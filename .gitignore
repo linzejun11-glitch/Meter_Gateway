@@ -1,0 +1,18 @@
+# Go 编译生成的 Windows 可执行文件
+*.exe
+
+# 测试、运行和临时日志
+*.log
+*.tmp
+*.out
+
+# Go 本地构建缓存
+.gocache/
+
+# 编辑器和IDE配置
+.vscode/
+.idea/
+
+# 操作系统生成的临时文件
+Thumbs.db
+Desktop.ini
