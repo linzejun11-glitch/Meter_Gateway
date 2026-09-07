@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # QS300 电表边缘网关
 
 这是一个只接入 QS300 分布式电表的 Go 网关程序。它在现场侧通过串口和
@@ -144,3 +145,6 @@ voltage       V
 current       mA
 active_power  W
 ```
+=======
+# Meter_Gateway
+>>>>>>> origin/main
