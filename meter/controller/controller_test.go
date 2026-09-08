@@ -37,7 +37,7 @@ func TestExecuteUsesDeviceInterface(t *testing.T) {
 		ControlActualState: true,
 		ControlStateKnown:  true,
 	}
-	controller := New(meter, newSilentClient(), 1)
+	controller := New(map[int]device.Device{1: meter}, newSilentClient())
 
 	ack := controller.execute(protocol.SwitchControl{
 		RequestID:    "0000000000001",
@@ -63,7 +63,7 @@ func TestExecuteMapsUnifiedDeviceError(t *testing.T) {
 		ControlStateKnown:  true,
 		ControlError:       errors.Join(device.ErrStateMismatch, errors.New("simulated")),
 	}
-	controller := New(meter, newSilentClient(), 1)
+	controller := New(map[int]device.Device{1: meter}, newSilentClient())
 
 	ack := controller.execute(protocol.SwitchControl{
 		RequestID:    "0000000000002",

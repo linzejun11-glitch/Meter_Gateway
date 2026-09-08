@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"MOCK_COLLECT/common/config"
 	"MOCK_COLLECT/meter/device"
 	"MOCK_COLLECT/meter/modbus"
 
@@ -35,7 +34,6 @@ type registerClient interface {
 	ReadHoldingRegisters(address, count uint16) ([]uint16, error)
 	ReadOneRegister(address uint16) (uint16, error)
 	WriteSingleCoil(address uint16, state bool) error
-	Close() error
 }
 
 // Driver 把QS300寄存器翻译成网关统一的device.Device接口。
@@ -45,13 +43,10 @@ type Driver struct {
 	confirmInterval time.Duration
 }
 
-// Open 打开Modbus-RTU串口并创建QS300驱动。
-func Open(cfg config.MeterConfig) (*Driver, error) {
-	bus, err := modbus.Open(cfg)
-	if err != nil {
-		return nil, normalizeError(err)
-	}
-	return newDriver(bus, doStateConfirmAttempts, doStateConfirmInterval), nil
+// New 在已经绑定Slave ID的寄存器客户端上创建QS300驱动。
+// 串口由应用层统一打开和关闭，因此每块电表不会重复占用同一个COM口。
+func New(client registerClient) *Driver {
+	return newDriver(client, doStateConfirmAttempts, doStateConfirmInterval)
 }
 
 func newDriver(
@@ -67,10 +62,9 @@ func newDriver(
 }
 
 func (d *Driver) Close() error {
-	if d == nil || d.bus == nil {
-		return nil
-	}
-	return d.bus.Close()
+	// QS300驱动不拥有共享RS485串口，所以这里不能关闭总线。
+	// 真正的串口会在全部电表任务退出后由app统一关闭。
+	return nil
 }
 
 // ReadMeasurements读取三个QS300寄存器并换算为统一工程单位。

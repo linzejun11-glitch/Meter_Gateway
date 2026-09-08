@@ -1,6 +1,4 @@
-// Package modbus 实现可被不同品牌驱动复用的 Modbus-RTU 主站能力。
-//
-// 这个包只处理串口、功能码、报文和CRC，不知道某个寄存器代表电压还是DO。
+// Package modbus 实现可被不同品牌驱动复用的Modbus-RTU主站能力。
 package modbus
 
 import (
@@ -21,7 +19,6 @@ const (
 )
 
 // ExceptionError 表示从站返回了Modbus异常响应。
-// 异常响应的功能码等于原功能码OR 0x80，第三个字节是异常码。
 type ExceptionError struct {
 	FunctionCode  byte
 	ExceptionCode byte
@@ -35,19 +32,20 @@ func (e *ExceptionError) Error() string {
 	)
 }
 
-// Client 是通用的Modbus-RTU主站客户端。
-// mutex保证多个上层任务不会同时向同一个串口发送报文。
-type Client struct {
-	port    serial.Port
-	slaveID byte
-	mutex   sync.Mutex
+// Bus 表示一条物理RS485总线。
+//
+// 一条总线只能在同一时刻进行一次请求/响应事务。多个电表Client虽然拥有
+// 不同Slave ID，但共同使用这里的mutex，因此不会把报文同时写入COM口。
+// mutex是mutual exclusion（互斥）的缩写。
+type Bus struct {
+	port serial.Port
 
-	// lastTransaction用于保证连续RTU帧之间的静默时间。
+	transactionMu   sync.Mutex
 	lastTransaction time.Time
 }
 
-// Open 根据配置打开串口并创建Modbus客户端。
-func Open(cfg config.MeterConfig) (*Client, error) {
+// OpenBus 只打开一次共享串口。
+func OpenBus(cfg config.RS485Config) (*Bus, error) {
 	port, err := serial.Open(&serial.Config{
 		Address:  cfg.PortName,
 		BaudRate: cfg.BaudRate,
@@ -59,16 +57,26 @@ func Open(cfg config.MeterConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open serial port %s: %w", cfg.PortName, err)
 	}
-
-	return &Client{port: port, slaveID: cfg.SlaveID}, nil
+	return &Bus{port: port}, nil
 }
 
-// Close 关闭底层串口。
-func (c *Client) Close() error {
-	if c == nil || c.port == nil {
+// Close 在所有电表采集和控制任务停止后关闭共享串口。
+func (b *Bus) Close() error {
+	if b == nil || b.port == nil {
 		return nil
 	}
-	return c.port.Close()
+	return b.port.Close()
+}
+
+// Client 返回指定从站地址的逻辑客户端，但不会再次打开串口。
+func (b *Bus) Client(slaveID byte) *Client {
+	return &Client{bus: b, slaveID: slaveID}
+}
+
+// Client 表示共享总线上的一个Modbus从站。
+type Client struct {
+	bus     *Bus
+	slaveID byte
 }
 
 // ReadHoldingRegisters 使用功能码03读取保持寄存器。
@@ -77,10 +85,10 @@ func (c *Client) ReadHoldingRegisters(address, count uint16) ([]uint16, error) {
 		return nil, fmt.Errorf("invalid register count: %d", count)
 	}
 
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	// 从构造请求到完整读取响应必须持有同一把总线锁。
+	c.bus.transactionMu.Lock()
+	defer c.bus.transactionMu.Unlock()
 
-	// 请求：从站(1)+功能码(1)+起始地址(2)+数量(2)+CRC(2)。
 	request := make([]byte, 6)
 	request[0] = c.slaveID
 	request[1] = functionReadHoldingRegisters
@@ -91,7 +99,8 @@ func (c *Client) ReadHoldingRegisters(address, count uint16) ([]uint16, error) {
 	response, err := c.exchange(request, functionReadHoldingRegisters)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"read holding registers address=%d count=%d: %w",
+			"slave=%d read holding registers address=%d count=%d: %w",
+			c.slaveID,
 			address,
 			count,
 			err,
@@ -109,14 +118,13 @@ func (c *Client) ReadHoldingRegisters(address, count uint16) ([]uint16, error) {
 	}
 
 	values := make([]uint16, count)
-	for i := 0; i < int(count); i++ {
-		start := 3 + i*2
-		values[i] = binary.BigEndian.Uint16(response[start : start+2])
+	for index := 0; index < int(count); index++ {
+		start := 3 + index*2
+		values[index] = binary.BigEndian.Uint16(response[start : start+2])
 	}
 	return values, nil
 }
 
-// ReadOneRegister 是读取单个保持寄存器的便捷方法。
 func (c *Client) ReadOneRegister(address uint16) (uint16, error) {
 	values, err := c.ReadHoldingRegisters(address, 1)
 	if err != nil {
@@ -127,10 +135,10 @@ func (c *Client) ReadOneRegister(address uint16) (uint16, error) {
 
 // WriteSingleCoil 使用功能码05写入一个线圈。
 func (c *Client) WriteSingleCoil(address uint16, state bool) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	c.bus.transactionMu.Lock()
+	defer c.bus.transactionMu.Unlock()
 
-	value := uint16(0x0000)
+	value := uint16(0)
 	if state {
 		value = 0xFF00
 	}
@@ -144,10 +152,8 @@ func (c *Client) WriteSingleCoil(address uint16, state bool) error {
 
 	response, err := c.exchange(request, functionWriteSingleCoil)
 	if err != nil {
-		return fmt.Errorf("write single coil address=%d: %w", address, err)
+		return fmt.Errorf("slave=%d write single coil address=%d: %w", c.slaveID, address, err)
 	}
-
-	// 功能码05的正常响应必须原样回显请求。
 	if len(response) != len(request) {
 		return fmt.Errorf(
 			"unexpected write response length: want=%d got=%d",
@@ -155,26 +161,24 @@ func (c *Client) WriteSingleCoil(address uint16, state bool) error {
 			len(response),
 		)
 	}
-	for i := range request {
-		if response[i] != request[i] {
+	for index := range request {
+		if response[index] != request[index] {
 			return fmt.Errorf("write response does not echo request")
 		}
 	}
 	return nil
 }
 
-// exchange 完成一次严格的一问一答串口事务。
-// 调用者必须已经持有c.mutex。
+// exchange 完成一次严格的一问一答事务；调用者必须已经锁定共享总线。
 func (c *Client) exchange(request []byte, expectedFunction byte) ([]byte, error) {
-	c.waitRTUSilentInterval()
+	c.bus.waitRTUSilentInterval()
 
-	if err := writeAll(c.port, request); err != nil {
-		c.lastTransaction = time.Now()
+	if err := writeAll(c.bus.port, request); err != nil {
+		c.bus.lastTransaction = time.Now()
 		return nil, fmt.Errorf("serial write: %w", err)
 	}
-
 	response, err := c.readResponse(expectedFunction)
-	c.lastTransaction = time.Now()
+	c.bus.lastTransaction = time.Now()
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +187,7 @@ func (c *Client) exchange(request []byte, expectedFunction byte) ([]byte, error)
 
 func (c *Client) readResponse(expectedFunction byte) ([]byte, error) {
 	prefix := make([]byte, 3)
-	if _, err := io.ReadFull(c.port, prefix); err != nil {
+	if _, err := io.ReadFull(c.bus.port, prefix); err != nil {
 		return nil, fmt.Errorf("read response prefix: %w", err)
 	}
 	if prefix[0] != c.slaveID {
@@ -196,7 +200,7 @@ func (c *Client) readResponse(expectedFunction byte) ([]byte, error) {
 
 	if prefix[1] == expectedFunction|0x80 {
 		crcBytes := make([]byte, 2)
-		if _, err := io.ReadFull(c.port, crcBytes); err != nil {
+		if _, err := io.ReadFull(c.bus.port, crcBytes); err != nil {
 			return nil, fmt.Errorf("read exception CRC: %w", err)
 		}
 		frame := append(prefix, crcBytes...)
@@ -226,17 +230,13 @@ func (c *Client) readResponse(expectedFunction byte) ([]byte, error) {
 		}
 		remainingLength = byteCount + 2
 	case functionWriteSingleCoil:
-		// 功能码05响应总长8字节，前3字节已经读取。
 		remainingLength = 5
 	default:
-		return nil, fmt.Errorf(
-			"unsupported expected function: 0x%02X",
-			expectedFunction,
-		)
+		return nil, fmt.Errorf("unsupported expected function: 0x%02X", expectedFunction)
 	}
 
 	remaining := make([]byte, remainingLength)
-	if _, err := io.ReadFull(c.port, remaining); err != nil {
+	if _, err := io.ReadFull(c.bus.port, remaining); err != nil {
 		return nil, fmt.Errorf("read remaining response: %w", err)
 	}
 	frame := append(prefix, remaining...)
@@ -246,13 +246,12 @@ func (c *Client) readResponse(expectedFunction byte) ([]byte, error) {
 	return frame, nil
 }
 
-// waitRTUSilentInterval 保证连续RTU帧之间至少约5毫秒静默时间。
-func (c *Client) waitRTUSilentInterval() {
-	if c.lastTransaction.IsZero() {
+func (b *Bus) waitRTUSilentInterval() {
+	if b.lastTransaction.IsZero() {
 		return
 	}
 	const minimumGap = 5 * time.Millisecond
-	elapsed := time.Since(c.lastTransaction)
+	elapsed := time.Since(b.lastTransaction)
 	if elapsed < minimumGap {
 		time.Sleep(minimumGap - elapsed)
 	}
@@ -260,14 +259,14 @@ func (c *Client) waitRTUSilentInterval() {
 
 func writeAll(writer io.Writer, data []byte) error {
 	for len(data) > 0 {
-		n, err := writer.Write(data)
+		written, err := writer.Write(data)
 		if err != nil {
 			return err
 		}
-		if n == 0 {
+		if written == 0 {
 			return io.ErrShortWrite
 		}
-		data = data[n:]
+		data = data[written:]
 	}
 	return nil
 }

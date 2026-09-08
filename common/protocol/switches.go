@@ -12,12 +12,12 @@ import (
 // 通信协议使用digital_inputs和digital_outputs组织JSON字段。
 // 把转换集中在这里，可以保证定时采集和控制后的补报使用完全相同的格式。
 func NewSwitchStatus(
-	slaveID byte,
+	meterID int,
 	switches device.SwitchSnapshot,
 ) SwitchStatus {
 	return SwitchStatus{
 		MessageType: MessageTypeSwitchStatus,
-		MeterID:     int(slaveID),
+		MeterID:     meterID,
 
 		DigitalInputs: SwitchChannels{
 			Channel1: switches.DI1,

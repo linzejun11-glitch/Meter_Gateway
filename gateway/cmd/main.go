@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,9 +13,12 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.LstdFlags)
+	// slog是Go标准库的结构化日志工具。TextHandler保持终端可读，
+	// 同时让每条日志都能携带meter_id、request_id等可检索字段。
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 	if err := run(); err != nil {
-		log.Fatal("统一网关异常停止：", err)
+		slog.Error("统一网关异常停止", "error", err)
+		os.Exit(1)
 	}
 }
 

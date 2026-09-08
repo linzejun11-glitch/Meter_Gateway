@@ -1,0 +1,36 @@
+# 网关与服务器之间的传输方式。当前只支持mqtt。
+transport: mqtt
+
+# 这条RS485总线由下面所有电表共享，所以串口只能打开一次。
+rs485:
+  port: COM3
+  baud_rate: 9600
+  data_bits: 8
+  parity: N
+  stop_bits: 1
+  timeout: 3s
+
+# meter_id是服务器识别电表的业务编号；slave_id是现场Modbus地址。
+# 同一条RS485总线上的每块电表必须设置不同的slave_id。
+meters:
+  - meter_id: 1
+    name: meter001
+    driver: qs300
+    slave_id: 1
+    collect_interval: 8s
+
+  # 接入第二块电表时，取消下面几行的注释并设置真实Slave ID。
+  # - meter_id: 2
+  #   name: meter002
+  #   driver: qs300
+  #   slave_id: 2
+  #   collect_interval: 8s
+
+# 整个网关只创建一个MQTT客户端，多块电表通过meter_id区分。
+mqtt:
+  broker: tcp://192.168.54.150:1883
+  device_name: dev1
+  password: "123456"
+  reply_timeout: 10s
+  chunk_size: 30
+  max_retransmits: 3

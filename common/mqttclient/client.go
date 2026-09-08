@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -30,8 +30,11 @@ const (
 
 // Client 只保存电表上报和DO控制所需的MQTT状态。
 type Client struct {
-	cfg     config.MQTTConfig
-	meterID byte
+	cfg config.MQTTConfig
+
+	// meterIDs保存这个网关管理的全部业务电表编号。
+	// MQTT只有一条连接，收到命令后通过meter_id决定目标电表。
+	meterIDs []int
 
 	mqttClient mqtt.Client
 	commands   chan protocol.SwitchControl
@@ -76,21 +79,23 @@ type pendingPost struct {
 
 // setRequest兼容服务端用布尔、数字或字符串表示DO状态。
 type setRequest struct {
-	ID     string         `json:"id"`
-	Params map[string]any `json:"params"`
+	ID      string         `json:"id"`
+	MeterID *int           `json:"meter_id,omitempty"`
+	Params  map[string]any `json:"params"`
 }
 
 type setReply struct {
-	ID   string `json:"id"`
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
+	ID      string `json:"id"`
+	MeterID int    `json:"meter_id"`
+	Code    int    `json:"code"`
+	Msg     string `json:"msg"`
 }
 
 // NewClient创建对象；真正连接网络要调用Run。
-func NewClient(cfg config.MQTTConfig, meterID byte) *Client {
+func NewClient(cfg config.MQTTConfig, meterIDs []int) *Client {
 	client := &Client{
 		cfg:                  cfg,
-		meterID:              meterID,
+		meterIDs:             append([]int(nil), meterIDs...),
 		commands:             make(chan protocol.SwitchControl, 20),
 		ready:                make(chan struct{}),
 		startupErrors:        make(chan error, 1),
@@ -118,16 +123,16 @@ func NewClient(cfg config.MQTTConfig, meterID byte) *Client {
 
 	// 首次连接及自动重连成功后都重新订阅电表所需Topic。
 	options.SetOnConnectHandler(func(_ mqtt.Client) {
-		log.Printf("Python MQTT Broker连接成功")
+		slog.Info("Python MQTT Broker连接成功")
 		if err := client.subscribe(); err != nil {
-			log.Printf("订阅Python MQTT Topic失败：%v", err)
+			slog.Error("订阅Python MQTT Topic失败", "error", err)
 			client.reportStartupError(err)
 			return
 		}
 		client.readyOnce.Do(func() { close(client.ready) })
 	})
 	options.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
-		log.Printf("Python MQTT连接断开：%v", err)
+		slog.Warn("Python MQTT连接断开", "error", err)
 	})
 
 	client.mqttClient = mqtt.NewClient(options)
@@ -154,8 +159,11 @@ func (c *Client) Run(ctx context.Context) error {
 		return errors.New("MQTT设备密码为空")
 	}
 
-	log.Printf("正在连接Python MQTT Broker：broker=%s device_name=%s",
-		c.cfg.Broker, c.cfg.DeviceName)
+	slog.Info(
+		"正在连接Python MQTT Broker",
+		"broker", c.cfg.Broker,
+		"device_name", c.cfg.DeviceName,
+	)
 	token := c.mqttClient.Connect()
 	if !token.WaitTimeout(12 * time.Second) {
 		c.disconnect()
@@ -168,7 +176,7 @@ func (c *Client) Run(ctx context.Context) error {
 
 	select {
 	case <-c.ready:
-		log.Printf("Python MQTT登录和Topic订阅完成，电表网关已就绪")
+		slog.Info("Python MQTT登录和Topic订阅完成，电表网关已就绪")
 	case err := <-c.startupErrors:
 		c.disconnect()
 		return fmt.Errorf("Python MQTT客户端启动失败: %w", err)
@@ -181,7 +189,7 @@ func (c *Client) Run(ctx context.Context) error {
 	<-ctx.Done()
 	c.stop()
 	c.disconnect()
-	log.Printf("Python MQTT连接已关闭")
+	slog.Info("Python MQTT连接已关闭")
 	return nil
 }
 
@@ -233,8 +241,12 @@ func (c *Client) publishPost(message any) error {
 		}
 		switch reply.Cmd {
 		case 0:
-			log.Printf("MQTT会话%d上报成功：共%d帧，重传%d轮",
-				sessionID, len(frames), retransmits)
+			slog.Info(
+				"MQTT会话上报成功",
+				"session_id", sessionID,
+				"frame_count", len(frames),
+				"retransmit_rounds", retransmits,
+			)
 			return nil
 		case 1:
 			return fmt.Errorf("MQTT会话%d被拒绝：JSON或数据格式错误（cmd=1）", sessionID)
@@ -248,8 +260,12 @@ func (c *Client) publishPost(message any) error {
 			if lossErr != nil {
 				return fmt.Errorf("MQTT会话%d补发清单无效: %w", sessionID, lossErr)
 			}
-			log.Printf("MQTT会话%d第%d轮选择重传：%v",
-				sessionID, retransmits, indexes)
+			slog.Warn(
+				"MQTT会话选择重传",
+				"session_id", sessionID,
+				"round", retransmits,
+				"indexes", indexes,
+			)
 			if err := c.publishFrames(frames, indexes); err != nil {
 				return err
 			}
@@ -259,7 +275,11 @@ func (c *Client) publishPost(message any) error {
 				return fmt.Errorf("MQTT会话%d超过最大重传轮数%d",
 					sessionID, c.cfg.MaxRetransmits)
 			}
-			log.Printf("MQTT会话%d第%d轮全部重传", sessionID, retransmits)
+			slog.Warn(
+				"MQTT会话全部重传",
+				"session_id", sessionID,
+				"round", retransmits,
+			)
 			if err := c.publishFrames(frames, allFrameIndexes(frames)); err != nil {
 				return err
 			}
@@ -287,8 +307,14 @@ func (c *Client) publishControlACK(ack protocol.ControlACK) error {
 	if err := c.publishMQTT(c.setReplyTopic(), frame); err != nil {
 		return fmt.Errorf("发布控制ACK失败: %w", err)
 	}
-	log.Printf("已回复电表控制结果：id=%s session_id=%d code=%d topic=%s",
-		requestID, sessionID, controlReplyCode(ack), c.setReplyTopic())
+	slog.Info(
+		"已回复电表控制结果",
+		"request_id", requestID,
+		"meter_id", ack.MeterID,
+		"session_id", sessionID,
+		"code", controlReplyCode(ack),
+		"topic", c.setReplyTopic(),
+	)
 	return nil
 }
 
@@ -297,7 +323,12 @@ func marshalSetReply(ack protocol.ControlACK) (string, []byte, error) {
 		return "", nil, fmt.Errorf("控制ACK的request_id必须是13位数字字符串：%q",
 			ack.RequestID)
 	}
-	reply := setReply{ID: ack.RequestID, Code: controlReplyCode(ack), Msg: "success"}
+	reply := setReply{
+		ID:      ack.RequestID,
+		MeterID: ack.MeterID,
+		Code:    controlReplyCode(ack),
+		Msg:     "success",
+	}
 	if !ack.Success {
 		reply.Msg = ack.Message
 		if reply.Msg == "" {
@@ -339,7 +370,7 @@ func (c *Client) subscribe() error {
 		if err := token.Error(); err != nil {
 			return fmt.Errorf("订阅Topic失败 %s: %w", subscription.topic, err)
 		}
-		log.Printf("已订阅Python MQTT Topic：%s", subscription.topic)
+		slog.Info("已订阅Python MQTT Topic", "topic", subscription.topic)
 	}
 	return nil
 }
@@ -347,7 +378,7 @@ func (c *Client) subscribe() error {
 func (c *Client) handlePostReply(_ mqtt.Client, message mqtt.Message) {
 	var reply postReply
 	if err := json.Unmarshal(message.Payload(), &reply); err != nil {
-		log.Printf("解析Python MQTT上报回复失败：%v", err)
+		slog.Error("解析Python MQTT上报回复失败", "error", err)
 		return
 	}
 	pending, exists := c.findPending(reply)
@@ -356,34 +387,51 @@ func (c *Client) handlePostReply(_ mqtt.Client, message mqtt.Message) {
 		if reply.SessionID != nil {
 			sessionText = strconv.Itoa(int(*reply.SessionID))
 		}
-		log.Printf("收到无法匹配的MQTT回复：id=%q session_id=%s cmd=%d",
-			reply.ID, sessionText, reply.Cmd)
+		slog.Warn(
+			"收到无法匹配的MQTT回复",
+			"id", reply.ID,
+			"session_id", sessionText,
+			"cmd", reply.Cmd,
+		)
 		return
 	}
 	select {
 	case pending.replies <- reply:
 	default:
-		log.Printf("MQTT会话%d（业务id=%s）回复队列已满，忽略cmd=%d",
-			pending.sessionID, pending.businessID, reply.Cmd)
+		slog.Warn(
+			"MQTT回复队列已满，忽略回复",
+			"session_id", pending.sessionID,
+			"business_id", pending.businessID,
+			"cmd", reply.Cmd,
+		)
 	}
 }
 
 func (c *Client) handleSet(_ mqtt.Client, message mqtt.Message) {
-	command, err := decodeSetRequest(message.Payload(), c.meterID)
+	command, err := decodeSetRequest(message.Payload(), c.meterIDs)
 	if err != nil {
-		log.Printf("丢弃无效电表控制命令：%v", err)
+		slog.Warn("丢弃无效电表控制命令", "error", err)
 		return
 	}
 	select {
 	case c.commands <- command:
-		log.Printf("电表控制命令已交给控制器：id=%s channel=%d state=%t",
-			command.RequestID, command.Channel, *command.DesiredState)
+		slog.Info(
+			"电表控制命令已交给控制器",
+			"request_id", command.RequestID,
+			"meter_id", command.MeterID,
+			"channel", command.Channel,
+			"state", *command.DesiredState,
+		)
 	default:
-		log.Printf("电表控制命令队列已满，丢弃id=%s", command.RequestID)
+		slog.Warn(
+			"电表控制命令队列已满，丢弃命令",
+			"request_id", command.RequestID,
+			"meter_id", command.MeterID,
+		)
 	}
 }
 
-func decodeSetRequest(payload []byte, meterID byte) (protocol.SwitchControl, error) {
+func decodeSetRequest(payload []byte, configuredMeterIDs []int) (protocol.SwitchControl, error) {
 	var request setRequest
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return protocol.SwitchControl{}, fmt.Errorf("解析set JSON失败: %w", err)
@@ -395,6 +443,13 @@ func decodeSetRequest(payload []byte, meterID byte) (protocol.SwitchControl, err
 	if len(request.Params) != 1 {
 		return protocol.SwitchControl{}, fmt.Errorf(
 			"每条set命令必须且只能控制一路DO，实际参数数量为%d", len(request.Params))
+	}
+
+	// 多设备命令必须显式携带meter_id，否则程序不知道应该控制哪块电表。
+	// 只有一块电表时继续兼容旧格式，自动使用唯一的业务编号。
+	meterID, err := resolveMeterID(request.MeterID, configuredMeterIDs)
+	if err != nil {
+		return protocol.SwitchControl{}, err
 	}
 
 	channel, name := 0, ""
@@ -414,11 +469,30 @@ func decodeSetRequest(payload []byte, meterID byte) (protocol.SwitchControl, err
 	return protocol.SwitchControl{
 		MessageType:  protocol.MessageTypeSwitchControl,
 		RequestID:    request.ID,
-		MeterID:      int(meterID),
+		MeterID:      meterID,
 		Channel:      channel,
 		DesiredState: &stateCopy,
 		Timestamp:    protocol.FormatTimestamp(time.Now()),
 	}, nil
+}
+
+// resolveMeterID完成MQTT业务编号的兼容和白名单校验。
+func resolveMeterID(requested *int, configured []int) (int, error) {
+	if len(configured) == 0 {
+		return 0, errors.New("网关没有配置任何电表")
+	}
+	if requested == nil {
+		if len(configured) == 1 {
+			return configured[0], nil
+		}
+		return 0, errors.New("多电表控制命令必须提供meter_id")
+	}
+	for _, meterID := range configured {
+		if meterID == *requested {
+			return meterID, nil
+		}
+	}
+	return 0, fmt.Errorf("meter_id=%d未在此网关中配置", *requested)
 }
 
 // parseBinarySetState兼容物模型常见的三种开关值写法。

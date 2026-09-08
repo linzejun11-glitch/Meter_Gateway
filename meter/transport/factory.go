@@ -21,7 +21,7 @@ var _ Client = (*mqttclient.Client)(nil)
 func NewClient(cfg config.AppConfig) (Client, error) {
 	switch cfg.Transport {
 	case config.TransportMQTT:
-		return mqttclient.NewClient(cfg.MQTT, cfg.Meter.SlaveID), nil
+		return mqttclient.NewClient(cfg.MQTT, cfg.MeterIDs()), nil
 
 	default:
 		return nil, fmt.Errorf("不支持的通信方式 %q", cfg.Transport)

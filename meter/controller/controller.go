@@ -8,7 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"MOCK_COLLECT/common/protocol"
@@ -20,24 +20,22 @@ const maxCachedACKs = 50
 
 // Controller 保存控制循环运行时需要的依赖。
 type Controller struct {
-	// meter是统一电表接口，控制器不依赖品牌、Modbus或串口库。
-	meter   device.Device
-	client  transport.Client
-	slaveID byte
-	cache   *ackCache
+	// meters使用业务meter_id索引全部电表。
+	// 一条MQTT控制命令只由这个控制器读取一次，再准确路由到目标电表。
+	meters map[int]device.Device
+	client transport.Client
+	cache  *ackCache
 }
 
 // New 创建控制器，但不会立即开始监听命令。
 func New(
-	meter device.Device,
+	meters map[int]device.Device,
 	client transport.Client,
-	slaveID byte,
 ) *Controller {
 	return &Controller{
-		meter:   meter,
-		client:  client,
-		slaveID: slaveID,
-		cache:   newACKCache(maxCachedACKs),
+		meters: meters,
+		client: client,
+		cache:  newACKCache(maxCachedACKs),
 	}
 }
 
@@ -55,30 +53,47 @@ func (c *Controller) Run(ctx context.Context) {
 				return
 			}
 
-			if cached, exists := c.cache.get(command.RequestID); exists {
-				log.Printf(
-					"收到重复控制命令%s，直接返回历史ACK",
-					command.RequestID,
+			// request_id由服务器生成。把meter_id也加入缓存键，可以避免
+			// 两块电表偶然收到相同request_id时错误复用另一块表的ACK。
+			cacheKey := fmt.Sprintf("%d:%s", command.MeterID, command.RequestID)
+			if cached, exists := c.cache.get(cacheKey); exists {
+				slog.Info(
+					"收到重复控制命令，直接返回历史ACK",
+					"request_id", command.RequestID,
+					"meter_id", command.MeterID,
 				)
 				c.publishACK(cached)
 				continue
 			}
 
 			ack := c.execute(command)
-			c.cache.put(command.RequestID, ack)
+			c.cache.put(cacheKey, ack)
 			c.publishACK(ack)
 
 			// 控制完成后立即重新读取一次DO状态，
 			// 并向当前服务器补发最新的DI/DO状态。
-			switches, err := c.meter.ReadSwitches()
+			meter, exists := c.meters[command.MeterID]
+			if !exists {
+				// execute已经回复INVALID_METER_ID；不存在目标设备时不能继续读取。
+				continue
+			}
+			switches, err := meter.ReadSwitches()
 			if err != nil {
-				log.Printf("控制后读取开关状态失败：%v", err)
+				slog.Error(
+					"控制后读取开关状态失败",
+					"meter_id", command.MeterID,
+					"error", err,
+				)
 				continue
 			}
 
-			status := protocol.NewSwitchStatus(c.slaveID, switches)
+			status := protocol.NewSwitchStatus(command.MeterID, switches)
 			if err := c.client.Publish(status); err != nil {
-				log.Printf("控制后上报开关状态失败：%v", err)
+				slog.Error(
+					"控制后上报开关状态失败",
+					"meter_id", command.MeterID,
+					"error", err,
+				)
 			}
 		}
 	}
@@ -105,9 +120,10 @@ func (c *Controller) execute(
 		return ack
 	}
 
-	if command.MeterID != int(c.slaveID) {
+	meter, exists := c.meters[command.MeterID]
+	if !exists {
 		ack.ErrorCode = "INVALID_METER_ID"
-		ack.Message = fmt.Sprintf("configured meter_id is %d", c.slaveID)
+		ack.Message = fmt.Sprintf("meter_id %d is not configured", command.MeterID)
 		return ack
 	}
 
@@ -131,7 +147,7 @@ func (c *Controller) execute(
 
 	// channel=1 -> 业务DO1 -> 仪表物理DO0 -> 端子15/16；
 	// channel=2 -> 业务DO2 -> 仪表物理DO1 -> 端子17/18。
-	actual, known, err := c.meter.ControlDigitalOutput(
+	actual, known, err := meter.ControlDigitalOutput(
 		command.Channel,
 		*command.DesiredState,
 	)
@@ -145,12 +161,12 @@ func (c *Controller) execute(
 		ack.ErrorCode = controlErrorCode(err)
 		ack.Message = err.Error()
 
-		log.Printf(
-			"控制失败：request_id=%s meter=%d channel=%d error=%v",
-			command.RequestID,
-			command.MeterID,
-			command.Channel,
-			err,
+		slog.Error(
+			"控制失败",
+			"request_id", command.RequestID,
+			"meter_id", command.MeterID,
+			"channel", command.Channel,
+			"error", err,
 		)
 		return ack
 	}
@@ -159,12 +175,12 @@ func (c *Controller) execute(
 	ack.ErrorCode = ""
 	ack.Message = "control succeeded"
 
-	log.Printf(
-		"控制成功：request_id=%s meter=%d channel=%d state=%t",
-		command.RequestID,
-		command.MeterID,
-		command.Channel,
-		*command.DesiredState,
+	slog.Info(
+		"控制成功",
+		"request_id", command.RequestID,
+		"meter_id", command.MeterID,
+		"channel", command.Channel,
+		"state", *command.DesiredState,
 	)
 
 	return ack
@@ -175,7 +191,12 @@ func (c *Controller) execute(
 // 不同通信客户端会把它转换为各自服务器要求的回复格式。
 func (c *Controller) publishACK(ack protocol.ControlACK) {
 	if err := c.client.Publish(ack); err != nil {
-		log.Printf("控制ACK发送失败：%v", err)
+		slog.Error(
+			"控制ACK发送失败",
+			"request_id", ack.RequestID,
+			"meter_id", ack.MeterID,
+			"error", err,
+		)
 	}
 }
 

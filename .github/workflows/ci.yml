@@ -1,0 +1,34 @@
+name: Go CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 单元测试全部使用模拟设备，不会访问真实COM口或MQTT服务器。
+      - name: Run unit tests with coverage
+        run: go test -count=1 "-coverprofile=coverage.out" ./...
+
+      - name: Show test coverage
+        run: go tool cover "-func=coverage.out"
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Build Windows programs
+        run: |
+          go build -o gateway.exe ./gateway/cmd
+          go build -o meter.exe ./meter/cmd

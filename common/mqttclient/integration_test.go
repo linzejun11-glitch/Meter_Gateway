@@ -160,7 +160,7 @@ func startIntegrationClient(
 			ChunkSize:      30,
 			MaxRetransmits: 3,
 		},
-		1,
+		[]int{1},
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())

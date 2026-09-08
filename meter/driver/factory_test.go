@@ -7,10 +7,10 @@ import (
 	"MOCK_COLLECT/common/config"
 )
 
-// TestOpenRejectsUnknownDriver 只验证工厂分支，不会打开串口。
+// TestNewRejectsUnknownDriver 只验证工厂分支，不会打开串口。
 // 新品牌尚未注册时应尽早返回容易理解的配置错误。
-func TestOpenRejectsUnknownDriver(t *testing.T) {
-	_, err := Open(config.MeterConfig{Driver: "unknown_meter"})
+func TestNewRejectsUnknownDriver(t *testing.T) {
+	_, err := New(config.MeterConfig{Driver: "unknown_meter"}, nil)
 	if err == nil {
 		t.Fatal("未知驱动应返回错误")
 	}

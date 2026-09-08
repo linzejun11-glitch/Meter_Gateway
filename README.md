@@ -1,171 +1,203 @@
 # 电表边缘网关
 
-这是一个使用 Go 编写的电表边缘网关。程序在现场侧通过串口和
-Modbus-RTU 与电表通信，在服务器侧通过 MQTT 与 Python 服务通信。
+这是一个使用Go编写的多电表边缘网关。多块电表使用不同Modbus Slave ID
+挂在同一条RS485总线上，网关只打开一次串口，并通过一条MQTT连接与Python
+服务器通信。
 
-当前已经实现 QS300 驱动。上层采集、控制和通信代码只依赖统一电表接口，
-以后接入其他品牌或型号时，不需要复制整套网关程序。
+当前实现QS300驱动。采集和控制层只依赖统一电表接口，因此以后可以继续增加
+其他品牌驱动。
 
-## 主要功能
+## 数据链路
 
-- 定时读取 A 相电压、电流和有功功率；
-- 读取两路 DI 和两路 DO；
-- 接收服务器下发的 DO1、DO2 控制命令；
-- 使用功能码 05 写线圈，并轮询状态寄存器确认实际状态；
-- 使用 MQTT 3.1.1、QoS 0 和设备名/密码认证；
-- 使用 12 字节自定义帧头、CRC16-CCITT 和 JSON 属性上报；
-- 支持单帧、多帧、选择重传和全部重传；
-- 等待 MQTT 连接和 Topic 订阅完成后再开始采集；
-- 使用 Context 和 WaitGroup 安全停止任务并关闭串口；
-- 支持使用模拟电表完成不依赖硬件和服务器的单元测试。
+```text
+QS300（Slave ID 1）──┐
+QS300（Slave ID 2）──┼── 同一条RS485总线 ── COM3
+更多电表……          ──┘             ↓
+                              Go电表网关
+                                   ↓
+                       一条MQTT连接 / 共享Topic
+                                   ↓
+                            Python MQTT服务器
+```
+
+所有电表可以拥有独立采集周期，但底层RS485事务由同一个互斥锁串行执行，
+不会出现两个请求同时写入串口的情况。
 
 ## 项目结构
 
 ```text
 MOCK_COLLECT/
-├─ gateway/
-│  └─ cmd/                    正式网关程序入口
+├─ .github/workflows/ci.yml    GitHub自动测试、静态检查和编译
+├─ config.yaml                 RS485、电表列表和MQTT配置
+├─ gateway/cmd/                正式程序入口
 ├─ meter/
-│  ├─ app/                    组装模块、启动顺序、连接就绪和优雅退出
-│  ├─ cmd/                    备用入口，与正式入口运行同一套电表应用
-│  ├─ collector/              周期采集和状态上报
-│  ├─ controller/             DO控制、结果确认和ACK缓存
-│  ├─ device/                 统一电表接口、统一数据类型和模拟电表
-│  ├─ driver/                 根据配置选择具体电表驱动
-│  │  └─ qs300/               QS300寄存器、单位换算和DI/DO控制规则
-│  ├─ modbus/                 通用Modbus-RTU报文、串口收发和CRC16
-│  └─ transport/              上层使用的统一网络通信接口
-├─ common/
-│  ├─ config/                 驱动、串口、MQTT和采集周期配置
-│  ├─ mqttclient/             MQTT、JSON、分帧和重传
-│  └─ protocol/               业务消息、MQTT帧和CRC16-CCITT
-├─ go.mod
-├─ go.sum
-└─ README.md
+│  ├─ app/                     多设备组装、启动、就绪等待和优雅退出
+│  ├─ collector/               每块电表的周期采集任务
+│  ├─ controller/              按meter_id路由DO控制命令
+│  ├─ device/                  统一电表接口和模拟电表
+│  ├─ driver/
+│  │  └─ qs300/                QS300寄存器、换算和DO规则
+│  ├─ modbus/                  共享RS485总线和通用Modbus-RTU
+│  └─ transport/               统一网络通信接口
+└─ common/
+   ├─ config/                  YAML解析、环境变量覆盖和配置校验
+   ├─ mqttclient/              MQTT、分帧、回复和重传
+   └─ protocol/                网关内部业务消息
 ```
 
-## 分层关系
+## YAML配置
 
-```text
-gateway/cmd
-    ↓
-meter/app（组装与生命周期）
-    ├─ collector ─┐
-    ├─ controller ├─→ device.Device（统一电表接口）
-    │             │        ↓
-    │             │   driver/qs300（型号规则）
-    │             │        ↓
-    │             │   modbus（通用RTU通信）→ COM口 → 电表
-    │             │
-    └─ transport.Client（统一网络接口）→ mqttclient → MQTT服务器
+程序默认读取当前目录的`config.yaml`。最小示例：
+
+```yaml
+transport: mqtt
+
+rs485:
+  port: COM3
+  baud_rate: 9600
+  data_bits: 8
+  parity: N
+  stop_bits: 1
+  timeout: 3s
+
+meters:
+  - meter_id: 1
+    name: meter001
+    driver: qs300
+    slave_id: 1
+    collect_interval: 8s
+
+  - meter_id: 2
+    name: meter002
+    driver: qs300
+    slave_id: 2
+    collect_interval: 10s
+
+mqtt:
+  broker: tcp://192.168.54.150:1883
+  device_name: dev1
+  password: "123456"
+  reply_timeout: 10s
+  chunk_size: 30
+  max_retransmits: 3
 ```
 
-这次拆分的关键是依赖方向：采集器和控制器认识 `device.Device`，但不认识
-QS300、寄存器地址或串口库。因此更换电表时，主要变化被限制在 `meter/driver`
-下面，上层业务消息和 MQTT 链路可以继续复用。
+字段含义：
 
-## 默认配置
+- `meter_id`：服务器使用的业务编号，必须唯一；
+- `slave_id`：电表现场Modbus地址，同一条RS485总线上必须唯一；
+- `name`：日志中方便人识别的名称；
+- `driver`：型号驱动名称，目前是`qs300`；
+- `collect_interval`：该电表自己的采集周期。
 
-```text
-电表驱动：qs300
-串口：COM3
-串口参数：9600 8 N 1
-Modbus Slave ID：1
-Modbus超时：3秒
-采集周期：8秒
-MQTT Broker：tcp://192.168.54.150:1883
-MQTT设备名：dev1
-MQTT密码：123456
-属性回复超时：10秒
-属性分片大小：30字节
-最大重传轮数：3
-```
+业务编号和Slave ID故意分开。例如现场将Slave ID从2调整成5时，只需修改
+`slave_id`，服务器中的`meter_id`可以保持不变。
 
-可通过环境变量选择电表驱动和覆盖 MQTT 参数：
+使用其他配置文件：
 
 ```powershell
-$env:METER_DRIVER="qs300"
-$env:TRANSPORT="mqtt"
+$env:GATEWAY_CONFIG="C:\gateway\production.yaml"
+go run ./gateway/cmd
+```
+
+以下网络配置仍可以用环境变量覆盖：
+
+```powershell
 $env:MQTT_BROKER="tcp://192.168.54.150:1883"
 $env:MQTT_DEVICE_NAME="dev1"
-$env:MQTT_PASSWORD="设备实际密码"
+$env:MQTT_PASSWORD="实际密码"
 ```
+
+YAML中出现未知字段、重复`meter_id`、重复`slave_id`或非法时长时，程序会在
+打开串口前直接报错。
+
+## 多设备MQTT控制
+
+整个网关只建立一个MQTT连接，多块电表共用以下Topic：
+
+```text
+$sys/{gateway_device_name}/post
+$sys/{gateway_device_name}/post/reply
+$sys/{gateway_device_name}/set
+$sys/{gateway_device_name}/set/reply
+```
+
+多块电表时，下行命令必须在JSON顶层提供`meter_id`：
+
+```json
+{
+  "id": "0000000000001",
+  "meter_id": 2,
+  "params": {
+    "do1": true
+  }
+}
+```
+
+命令含义是：控制业务编号为2的电表，将DO1闭合。
+
+控制回复也会带回相同的`meter_id`：
+
+```json
+{"id":"0000000000001","meter_id":2,"code":0,"msg":"success"}
+```
+
+每条命令只能包含`do1`或`do2`中的一个。值兼容`true/false`、数字`0/1`
+和字符串`"0"/"1"`。
+
+为了兼容现有单表服务器，配置中只有一块电表时，命令可以省略`meter_id`；
+配置两块或更多电表后，省略它会被拒绝。
 
 ## 运行
 
-运行前关闭 SSCOM、ModbusTool 等占用 COM3 的程序。
-
-正式运行：
+运行前关闭SSCOM、ModbusTool等占用串口的程序：
 
 ```powershell
 go run ./gateway/cmd
 ```
 
-备用入口：
+备用入口运行的是同一套应用，不能和正式入口同时运行：
 
 ```powershell
 go run ./meter/cmd
 ```
 
-两个入口运行的是同一套应用，都会使用同一串口和同一 MQTT Client ID，
-因此不能同时运行。
-
 ## 无设备测试
 
-以下命令不会启动网关入口，不会打开 COM3，也不会连接 MQTT 服务器：
+普通测试不会打开COM口，也不会连接MQTT服务器：
 
 ```powershell
-go test ./...
+go test -count=1 ./...
 go vet ./...
+go build -o gateway.exe ./gateway/cmd
+go build -o meter.exe ./meter/cmd
 ```
 
-单元测试使用 `meter/device.Fake` 和 QS300 的内存假总线验证：
+当前自动测试覆盖：
 
-- 原始寄存器值的单位换算；
-- 310、311 寄存器的 DI/DO 位解析；
-- DO1/DO2 到线圈 0/1 的地址映射；
-- 电表状态延迟刷新时的轮询确认；
-- 状态不一致时的统一错误；
-- 采集数据和控制命令能否正确穿过统一接口。
+- YAML解析、未知字段和重复编号检查；
+- 两个Slave ID共享一条RS485总线且事务不会重叠；
+- QS300寄存器、单位换算、DI/DO映射和控制确认；
+- 两块模拟电表同时启动、分别上报和优雅退出；
+- MQTT多设备命令路由、未连接错误、自动重连配置；
+- 控制命令路由、ACK缓存、分帧和重传算法。
 
-本地编译同样不会运行程序或访问设备：
+推送到GitHub后，`.github/workflows/ci.yml`会自动运行测试、`go vet`和两个
+Windows程序的编译。
+
+需要真实Python服务器的测试默认跳过。服务器可用后，可以显式启用：
 
 ```powershell
-go build -o ./gateway.exe ./gateway/cmd
-go build -o ./meter.exe ./meter/cmd
+$env:PYTHON_MQTT_INTEGRATION="1"
+go test ./common/mqttclient -run Integration -v
 ```
 
-## MQTT Topic
+## QS300通道和寄存器
 
 ```text
-$sys/{device}/post          电表属性上报
-$sys/{device}/post/reply    上报确认和重传命令
-$sys/{device}/set           DO控制命令
-$sys/{device}/set/reply     DO控制结果
-```
+JSON do1 → channel=1 → QS300物理DO0 → 端子15/16 → 线圈0
+JSON do2 → channel=2 → QS300物理DO1 → 端子17/18 → 线圈1
 
-## DO通道映射
-
-```text
-JSON do1 → channel=1 → QS300物理DO0 → 端子15/16 → Modbus线圈0
-JSON do2 → channel=2 → QS300物理DO1 → 端子17/18 → Modbus线圈1
-```
-
-控制命令的 id 必须是 13 位数字字符串，每条命令只能控制一路：
-
-```json
-{"id":"0000000000001","params":{"do1":true}}
-{"id":"0000000000002","params":{"do2":"0"}}
-```
-
-DO 值兼容 `true/false`、数字 `0/1` 和字符串 `"0"/"1"`。
-
-## QS300寄存器
-
-这些地址只属于 QS300，因此保存在 `meter/driver/qs300`，没有放进通用
-Modbus 层：
-
-```text
 70   A相电压
 76   A相电流
 79   A相有功功率
@@ -176,25 +208,16 @@ Modbus 层：
 311  DI状态
 ```
 
-测量单位：
+## 接入其他品牌
 
-```text
-voltage       V
-current       mA
-active_power  W
-```
-
-## 接入新品牌电表
-
-1. 在 `meter/driver` 下新建型号目录，例如 `meter/driver/brandx`；
-2. 实现 `meter/device.Device` 接口，把该型号的寄存器和换算规则放入目录；
-3. 在 `meter/driver/factory.go` 中注册新的 `METER_DRIVER` 名称；
-4. 为新驱动编写内存假总线测试；
-5. 最后再使用真实设备做串口参数、寄存器表和接线端子的现场确认。
+1. 在`meter/driver`下创建新型号目录；
+2. 实现`meter/device.Device`接口；
+3. 将型号寄存器和换算规则保存在新驱动中；
+4. 在`meter/driver/factory.go`注册驱动名；
+5. 先使用内存假总线编写测试，再进行真实设备联调。
 
 ## 无硬件验证的边界
 
-单元测试和编译可以证明软件分层、数据转换和控制流程正确，但无法替代以下
-现场验证：厂商寄存器手册是否与实际固件一致、RS-485 接线及串口参数、继电器
-端子的电气特性，以及真实 MQTT Broker 的认证和网络环境。设备和服务器恢复后，
-仍应补做一次完整端到端联调。
+自动测试能够验证程序结构、并发保护、数据转换和命令路由，但不能证明真实
+设备的Slave ID、RS485接线、寄存器手册、继电器端子和实际固件完全一致。
+设备和服务器恢复后，仍需补做一次完整端到端联调。

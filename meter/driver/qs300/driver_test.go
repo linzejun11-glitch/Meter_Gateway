@@ -160,16 +160,16 @@ func TestReadInfo(t *testing.T) {
 	}
 }
 
-// TestCloseDelegatesToBus 验证关闭驱动会继续关闭它持有的串口总线。
-func TestCloseDelegatesToBus(t *testing.T) {
+// TestCloseDoesNotCloseSharedBus 验证关闭单块电表驱动不会关闭共享总线。
+func TestCloseDoesNotCloseSharedBus(t *testing.T) {
 	bus := &fakeBus{registers: map[uint16]uint16{}}
 	driver := newDriver(bus, 1, 0)
 
 	if err := driver.Close(); err != nil {
 		t.Fatalf("Close返回意外错误：%v", err)
 	}
-	if bus.closeCalls != 1 {
-		t.Fatalf("底层Close调用次数=%d，期望1", bus.closeCalls)
+	if bus.closeCalls != 0 {
+		t.Fatalf("单块电表不能关闭共享总线，实际调用次数=%d", bus.closeCalls)
 	}
 }
 

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,10 +16,12 @@ import (
 //
 // 入口只负责调用run并处理最终错误，具体启动流程已经交给app包。
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 	if err := run(); err != nil {
 		// run返回前已经完成停止goroutine和关闭串口，
 		// 因此这里使用Fatal退出不会跳过重要的清理工作。
-		log.Fatal("程序异常停止：", err)
+		slog.Error("程序异常停止", "error", err)
+		os.Exit(1)
 	}
 }
 

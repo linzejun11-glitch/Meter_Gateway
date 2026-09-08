@@ -8,7 +8,7 @@ package collector
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"MOCK_COLLECT/common/protocol"
@@ -23,7 +23,7 @@ type Collector struct {
 	// meter是统一电表接口。采集器不需要知道实际品牌或底层协议。
 	meter    device.Device
 	client   transport.Client
-	slaveID  byte
+	meterID  int
 	interval time.Duration
 }
 
@@ -31,13 +31,13 @@ type Collector struct {
 func New(
 	meter device.Device,
 	client transport.Client,
-	slaveID byte,
+	meterID int,
 	interval time.Duration,
 ) *Collector {
 	return &Collector{
 		meter:    meter,
 		client:   client,
-		slaveID:  slaveID,
+		meterID:  meterID,
 		interval: interval,
 	}
 }
@@ -78,11 +78,11 @@ func (c *Collector) collectAndPublish() {
 
 	measurements, err := c.meter.ReadMeasurements()
 	if err != nil {
-		log.Printf("采集测量数据失败：%v", err)
+		slog.Error("采集测量数据失败", "meter_id", c.meterID, "error", err)
 	} else {
 		message := protocol.MeterData{
 			MessageType: protocol.MessageTypeMeterData,
-			MeterID:     int(c.slaveID),
+			MeterID:     c.meterID,
 			Voltage:     measurements.Voltage,
 			Current:     measurements.Current,
 			ActivePower: measurements.ActivePower,
@@ -91,14 +91,15 @@ func (c *Collector) collectAndPublish() {
 
 		// transport.Client会把内部消息转换后交给Python MQTT服务器。
 		if err := c.client.Publish(message); err != nil {
-			log.Printf("测量数据上报失败：%v", err)
+			slog.Error("测量数据上报失败", "meter_id", c.meterID, "error", err)
 		}
 
-		log.Printf(
-			"测量数据：Ua=%.1fV Ia=%.0fmA Pa=%.0fW",
-			measurements.Voltage,
-			measurements.Current,
-			measurements.ActivePower,
+		slog.Info(
+			"测量数据",
+			"meter_id", c.meterID,
+			"voltage_v", measurements.Voltage,
+			"current_ma", measurements.Current,
+			"active_power_w", measurements.ActivePower,
 		)
 	}
 
@@ -108,20 +109,21 @@ func (c *Collector) collectAndPublish() {
 
 	switches, err := c.meter.ReadSwitches()
 	if err != nil {
-		log.Printf("采集开关量失败：%v", err)
+		slog.Error("采集开关量失败", "meter_id", c.meterID, "error", err)
 		return
 	}
 
-	status := protocol.NewSwitchStatus(c.slaveID, switches)
+	status := protocol.NewSwitchStatus(c.meterID, switches)
 	if err := c.client.Publish(status); err != nil {
-		log.Printf("开关状态上报失败：%v", err)
+		slog.Error("开关状态上报失败", "meter_id", c.meterID, "error", err)
 	}
 
-	log.Printf(
-		"开关状态：DI1=%t DI2=%t DO1=%t DO2=%t",
-		switches.DI1,
-		switches.DI2,
-		switches.DO1,
-		switches.DO2,
+	slog.Info(
+		"开关状态",
+		"meter_id", c.meterID,
+		"di1", switches.DI1,
+		"di2", switches.DI2,
+		"do1", switches.DO1,
+		"do2", switches.DO2,
 	)
 }

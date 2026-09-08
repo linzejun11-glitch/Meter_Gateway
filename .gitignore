@@ -5,6 +5,7 @@
 *.log
 *.tmp
 *.out
+coverage.out
 
 # Go 本地构建缓存
 .gocache/
