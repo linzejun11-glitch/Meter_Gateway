@@ -21,9 +21,12 @@ const (
 
 // MeterConfig 保存电表串口和 Modbus 从站配置。
 //
-// 注意：这里只描述“如何找到电表并和它说话”，不包含寄存器地址。
-// 寄存器地址属于设备协议，统一放在 modbus 包中。
+// 注意：这里只描述“选择哪种电表，以及如何找到它”，不包含寄存器地址。
+// 寄存器地址属于具体型号协议，统一放在对应的driver子包中。
 type MeterConfig struct {
+	// Driver 选择电表型号驱动。当前支持qs300；未来可增加其他品牌。
+	Driver string
+
 	// PortName 是 Windows 设备管理器显示的虚拟串口名称。
 	PortName string
 
@@ -88,6 +91,7 @@ func LoadAppConfig() (AppConfig, error) {
 	cfg := AppConfig{
 		Transport: transport,
 		Meter: MeterConfig{
+			Driver:   envOrDefault("METER_DRIVER", "qs300"),
 			PortName: "COM3",
 			BaudRate: 9600,
 			DataBits: 8,
@@ -133,6 +137,9 @@ func ParseTransport(value string) (TransportType, error) {
 
 // Validate 检查配置中会导致程序无法正常运行的明显错误。
 func (cfg AppConfig) Validate() error {
+	if strings.TrimSpace(cfg.Meter.Driver) == "" {
+		return fmt.Errorf("电表驱动名称不能为空")
+	}
 	if cfg.Meter.PortName == "" {
 		return fmt.Errorf("串口名称不能为空")
 	}

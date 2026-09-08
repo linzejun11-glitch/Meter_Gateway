@@ -5,14 +5,14 @@ import (
 	"log"
 
 	"MOCK_COLLECT/common/config"
-	"MOCK_COLLECT/meter/modbus"
+	"MOCK_COLLECT/meter/device"
 )
 
 // printDeviceInfo 读取并打印电表通信参数。
 //
 // 这是启动诊断信息，不属于定时采集业务，所以放在app包。
-func printDeviceInfo(meter *modbus.Client) {
-	info, err := meter.ReadDeviceInfo()
+func printDeviceInfo(meter device.Device) {
+	info, err := meter.ReadInfo()
 	if err != nil {
 		log.Printf("读取仪表通信参数失败：%v", err)
 		return
@@ -45,7 +45,8 @@ func printDeviceInfo(meter *modbus.Client) {
 
 // printConfig 打印当前运行配置，但永远不打印设备密码。
 func printConfig(cfg config.AppConfig) {
-	fmt.Println("QS300分布式电表采集客户端")
+	fmt.Println("电表边缘网关客户端")
+	fmt.Println("电表驱动：", cfg.Meter.Driver)
 	fmt.Println("串口：", cfg.Meter.PortName)
 	fmt.Println(
 		"串口参数：",

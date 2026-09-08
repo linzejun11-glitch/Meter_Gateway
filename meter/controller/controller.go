@@ -9,21 +9,19 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"MOCK_COLLECT/common/protocol"
-	"MOCK_COLLECT/meter/modbus"
+	"MOCK_COLLECT/meter/device"
 	"MOCK_COLLECT/meter/transport"
-
-	"github.com/goburrow/serial"
 )
 
 const maxCachedACKs = 50
 
 // Controller 保存控制循环运行时需要的依赖。
 type Controller struct {
-	meter   *modbus.Client
+	// meter是统一电表接口，控制器不依赖品牌、Modbus或串口库。
+	meter   device.Device
 	client  transport.Client
 	slaveID byte
 	cache   *ackCache
@@ -31,7 +29,7 @@ type Controller struct {
 
 // New 创建控制器，但不会立即开始监听命令。
 func New(
-	meter *modbus.Client,
+	meter device.Device,
 	client transport.Client,
 	slaveID byte,
 ) *Controller {
@@ -181,24 +179,29 @@ func (c *Controller) publishACK(ack protocol.ControlACK) {
 	}
 }
 
-// controlErrorCode 将底层错误转换成服务器容易判断的业务错误码。
+// controlErrorCode 将不同品牌驱动的统一错误转换成业务错误码。
+//
+// 这里保留服务器已经使用的MODBUS_*文本，避免本次内部架构调整意外改变
+// 现有MQTT接口契约。将来如果服务器接口升级，应由双方一起修改和版本化。
 func controlErrorCode(err error) string {
-	if errors.Is(err, serial.ErrTimeout) ||
-		strings.Contains(strings.ToLower(err.Error()), "timeout") {
+	if errors.Is(err, device.ErrTimeout) {
 		return "MODBUS_TIMEOUT"
 	}
 
-	var exception *modbus.ExceptionError
-	if errors.As(err, &exception) {
-		return "MODBUS_EXCEPTION"
-	}
-
-	if errors.Is(err, modbus.ErrStateMismatch) {
+	if errors.Is(err, device.ErrStateMismatch) {
 		return "STATE_MISMATCH"
 	}
 
-	if strings.Contains(strings.ToLower(err.Error()), "crc") {
+	if errors.Is(err, device.ErrDeviceException) {
+		return "MODBUS_EXCEPTION"
+	}
+
+	if errors.Is(err, device.ErrChecksum) {
 		return "MODBUS_CRC_ERROR"
+	}
+
+	if errors.Is(err, device.ErrProtocol) {
+		return "MODBUS_ERROR"
 	}
 
 	return "MODBUS_ERROR"

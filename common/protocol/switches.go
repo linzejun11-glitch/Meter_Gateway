@@ -3,17 +3,17 @@ package protocol
 import (
 	"time"
 
-	"MOCK_COLLECT/meter/modbus"
+	"MOCK_COLLECT/meter/device"
 )
 
-// NewSwitchStatus 把Modbus层读取到的开关快照转换为通信层使用的消息。
+// NewSwitchStatus 把电表驱动读取到的开关快照转换为通信层使用的消息。
 //
 // Modbus层使用DI1、DI2、DO1、DO2表示硬件状态；
 // 通信协议使用digital_inputs和digital_outputs组织JSON字段。
 // 把转换集中在这里，可以保证定时采集和控制后的补报使用完全相同的格式。
 func NewSwitchStatus(
 	slaveID byte,
-	switches modbus.SwitchSnapshot,
+	switches device.SwitchSnapshot,
 ) SwitchStatus {
 	return SwitchStatus{
 		MessageType: MessageTypeSwitchStatus,

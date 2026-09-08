@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"MOCK_COLLECT/common/protocol"
-	"MOCK_COLLECT/meter/modbus"
+	"MOCK_COLLECT/meter/device"
 	"MOCK_COLLECT/meter/transport"
 )
 
@@ -20,7 +20,8 @@ import (
 //
 // 把这些依赖放进结构体后，Run和collectAndPublish不需要传很多参数。
 type Collector struct {
-	meter    *modbus.Client
+	// meter是统一电表接口。采集器不需要知道实际品牌或底层协议。
+	meter    device.Device
 	client   transport.Client
 	slaveID  byte
 	interval time.Duration
@@ -28,7 +29,7 @@ type Collector struct {
 
 // New 创建采集器，但不会立即启动采集。
 func New(
-	meter *modbus.Client,
+	meter device.Device,
 	client transport.Client,
 	slaveID byte,
 	interval time.Duration,

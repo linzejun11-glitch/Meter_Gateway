@@ -16,7 +16,7 @@ import (
 	"MOCK_COLLECT/common/config"
 	"MOCK_COLLECT/meter/collector"
 	"MOCK_COLLECT/meter/controller"
-	"MOCK_COLLECT/meter/modbus"
+	"MOCK_COLLECT/meter/driver"
 	"MOCK_COLLECT/meter/transport"
 )
 
@@ -41,9 +41,10 @@ func (a *Application) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	meter, err := modbus.Open(a.cfg.Meter)
+	// 应用层只通过工厂创建统一电表，不直接依赖QS300或Modbus实现。
+	meter, err := driver.Open(a.cfg.Meter)
 	if err != nil {
-		return fmt.Errorf("打开电表串口失败: %w", err)
+		return fmt.Errorf("打开电表驱动失败: %w", err)
 	}
 
 	// 这个defer会在所有工作goroutine退出后执行，

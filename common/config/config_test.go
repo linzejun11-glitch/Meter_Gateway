@@ -59,6 +59,8 @@ func TestParseTransport(t *testing.T) {
 // TestLoadAppConfigForMQTT 验证默认值和环境变量可以构造MQTT配置。
 func TestLoadAppConfigForMQTT(t *testing.T) {
 	t.Setenv("TRANSPORT", "mqtt")
+	// 设为空字符串，用来稳定验证未选择驱动时会采用qs300默认值。
+	t.Setenv("METER_DRIVER", "")
 	t.Setenv("MQTT_BROKER", "tcp://192.0.2.10:1883")
 	t.Setenv("MQTT_DEVICE_NAME", "meter-gateway-1")
 	t.Setenv("MQTT_PASSWORD", "test-secret")
@@ -75,6 +77,9 @@ func TestLoadAppConfigForMQTT(t *testing.T) {
 	if cfg.MQTT.DeviceName != "meter-gateway-1" {
 		t.Fatalf("MQTT设备名称=%q", cfg.MQTT.DeviceName)
 	}
+	if cfg.Meter.Driver != "qs300" {
+		t.Fatalf("电表驱动=%q，期望qs300", cfg.Meter.Driver)
+	}
 }
 
 // validTestConfig 返回一份不依赖真实串口和网络的合法配置。
@@ -82,6 +87,7 @@ func validTestConfig() AppConfig {
 	return AppConfig{
 		Transport: TransportMQTT,
 		Meter: MeterConfig{
+			Driver:   "qs300",
 			PortName: "COM_TEST",
 			SlaveID:  1,
 			Timeout:  time.Second,
